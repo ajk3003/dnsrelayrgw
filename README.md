@@ -70,9 +70,9 @@ custom DNS relay would be the string "cname"
 
 More help can be found using the "-h" option when starting the custom DNS relay.
 An example input to start the custom DNS relay is below:
-'''
+```
 # python3.7 customDNSv1.py -saddr 192.168.1.5 -sport 53 -tcp yes -cname yes -randrgw yes -cnamestr cname -rgws 192.168.2.5 53 192.168.3.5 53
-'''
+```
 The example here assumes that the given server address and port is available in
 the system, and that Realm Gateway is run on the given addresses and ports.
 The DNS server component of each Realm Gateway is connected to these
@@ -104,14 +104,14 @@ on its source address (if it comes from the addresses connected to the
 protected service). An example config for 2 simultaneous Realm Gateways is
 below. Note that the rgw1 and rgw2 tables should have been created for the
 system and iptables should have been installed:
-'''
+```
 # iptables -A PREROUTING -s <prot.serv.addr1 for RGW1> -t mangle -j MARK --set-mark 1
 # iptables -A PREROUTING -s <prot.serv.addr2 for RGW2> -t mangle -j MARK --set-mark 2
 # ip rule add fwmark 1 table rgw1
 # ip rule add fwmark 2 table rgw2
 # ip route add default via <RGW1 private side addr> dev <iface connected to RGW1> table rgw1
 # ip route add default via <RGW2 private side addr> dev <iface connected to RGW2> table rgw2
-'''
+```
 
 If a nested Realm Gateways are used, the nested Realm Gateway code should be
 adjusted so that it can support predetermined access address allocation based
