@@ -32,7 +32,11 @@ import dns.rcode
 import dns.rdataclass
 import dns.rdatatype
 
-
+"""
+This is a helper module for the custom DNS relay program. This code contains
+mainly functions to parse, check and validate DNS messages with the help of
+dnspython library. For more details check the main program code and README.
+"""
 # giveDNSInfo returns a tuple with the following:
 #
 # ( dns message object (0 if not needed),
@@ -50,6 +54,8 @@ import dns.rdatatype
 # 2 - Valid normal query, send truncated reply
 # 3 - Valid normal query for a CNAME address, forward to rgw
 # 4 - Valid normal query, forward to rgw
+
+
 def getDNSInfoUDP(data, service_cname, mode, caddr, mask, ecs):
 
     try:

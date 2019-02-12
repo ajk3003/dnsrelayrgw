@@ -23,6 +23,8 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
+
+import argparse
 import multiprocessing
 import random
 import socket
@@ -47,23 +49,31 @@ import dns.rdatatype
 
 from dnshelperfunctions1 import getDNSInfoUDP, getDNSInfoUDPNoCname
 from dnshelperfunctions1 import getDNSInfoTCP, getDNSReplyInfo
+"""
+This is a custom DNS relay program that uses the dnshelperfunctions file in
+addition. The program runs 4 separate processes, where 2 are dedicated to
+act as TCP and UDP servers, 1 is for data/query processing and 1 is for
+relaying request to the Realm Gateway. Addresses, ports, security options
+and limited DNS options can be given as input on the command line when the
+program is started. See use the "-h" argument and check the README for
+more details.
+"""
+# TODO: There may be a need for flushing/clearing the dict containing CNAME
+# message state information periodically so that it doesn't end up taking too
+# much space in memory. In principle this could be just done in a thread in
+# the CP process on set time intervals by locking the dict and then clearing
+# it. This would cause some ongoing DNS queries to fail, but the respective
+# clients could do retries to remedy this.
 
-# temp default values for variables below
-# TODO: adjust and/or put argparse input instead
-SERVADDR = ("195.148.125.222", 53)
+# Some default buffer values for network connections
 SERVUDPBFR = 4096
 SERVTCPBFR = 4096
-RGWADDR1 = ("195.148.125.229", 53)
-RGWADDR2 = ("195.148.125.234", 53)
 FWDUDPBFR = 4096
 FWDTCPBFR = 4096
-SERVICECNAME = "cname-net1"
+# ECS subnet mask accuracy - RGW supports properly only sizes 24/16/8
 ECSMASK = 24
-DNSTIMEOUT = 3
-DNSTRIES = 3
-# tempp
-# DNS2ADDR = ("10.0.3.146", 53)
 
+# Data structures and object locks to facilitate threading
 rgwlist = []
 cnames = {}
 events = {}
@@ -72,6 +82,7 @@ lock_cnames = threading.Lock()
 lock_events = threading.Lock()
 lock_P2datamap = threading.Lock()
 
+# Values that are finally set by argument input on the program start
 randomizeRGW = True
 forwardECS = True
 CNAMEstep = True
@@ -79,10 +90,10 @@ TCPstep = True
 
 
 # Process 1 (UDP server) definition, threads, etc. below:
-def process1_UDPsrv(q1, q2):
+def process1_UDPsrv(q1, q2, servaddr):
     # tempp
     print("P1 - Starting process 1 - UDP sender & server\n")
-    thread1 = P1T1_UDPServer(q1, SERVADDR)
+    thread1 = P1T1_UDPServer(q1, servaddr)
     thread1.start()
     time.sleep(1)
     thread2 = P1T2_UDPSender(q2, thread1.return_server_socket())
@@ -155,11 +166,11 @@ class MyUDPServer(socketserver.UDPServer):
 
 
 # Process 2 (TCP server) definition, threads, etc. below:
-def process2_TCPsrv(q3, q4):
+def process2_TCPsrv(q3, q4, servaddr):
     # tempp
     print("P2 - Starting process 2\n")
     if TCPstep == 1:
-        tcpserverthread = P2T1_TCPServer(q3, SERVADDR)
+        tcpserverthread = P2T1_TCPServer(q3, servaddr)
         tcpserverthread.start()
     # tempp
     print("P2 - Starting manager loop")
@@ -275,27 +286,9 @@ class P3T1_UDPH(threading.Thread):
         print("P3T1 - CP UDPH thread starting\n")
 
     def run(self):
-        # TODO: change TCP/CNAMEsteps to local variables given as input
-
         # tempp
         print("P3T1 - CP UDPH thread listening loop starting\n")
-        # giveDNSInfo(NoCname) returns a tuple with the following:
-        #
-        # ( dns message object (0 if not needed),
-        #   resultcode,
-        #   randomized CNAME string in question section of query (0 if no),
-        #   client subnet (0 if no edns client subnet info),
-        #   dns message id (0 if not needed),
-        # )
-        #
-        # Specific values in tuple are 0 if not applicable/not found/error
-        #
-        # result codes:
-        # 0 - Malformed message overall, discard & no reply
-        # 1 - Problematic DNS query (wrong opcode or no query data), discard
-        # 2 - Valid normal query, send truncated reply
-        # 3 - Valid normal query for a CNAME address, forward to rgw
-        # 4 - Valid normal query, forward to rgw
+
         while True:
             data = self.q1.get()
             if ((TCPstep is True) and (CNAMEstep is True)):
@@ -352,16 +345,7 @@ class P3T1_UDPH(threading.Thread):
                                  dnsmsg_t[3],
                                  dnsmsg_t[4],
                                  tempaddr))
-                    # Tuple values:
-                    # [0] = dnsmsg_t[0] = dns message(query) in wire format
-                    # [1] = data[1] = client address of the query (addr, port)
-                    # [2] = threadid if using TCP, for p2 manager. -1 if UDP
-                    # [3] = dnsmsg_t[3] = subnet addr (0 if not present)
-                    # [4] = dnsmsg_t[4] = dns msg/query id
 
-                    # tempp
-                    # print("P3T1 - CP UDPH thread received and sent data:\n")
-                    # print("Valid UDP CNAME query - forwarding to rgw.\n")
                 except KeyError:
                     lock_cnames.release()
                     print("P3T1 - DNS message CNAME not in dict\n")
@@ -373,16 +357,6 @@ class P3T1_UDPH(threading.Thread):
                              dnsmsg_t[3],
                              dnsmsg_t[4],
                              0))
-                # Tuple values:
-                # [0] = dnsmsg_t[0] = dns message(query) in wire format
-                # [1] = data[1] = client address of the query (addr, port)
-                # [2] = threadid if using TCP, for p2 manager. -1 if UDP
-                # [3] = dnsmsg_t[3] = subnet addr (0 if not present)
-                # [4] = dnsmsg_t[4] = dns msg/query id
-
-                # tempp
-                # print("P3T1 - CP UDPH thread received and sent data:\n")
-                # print("Valid UDP DNS query - forwarding to rgw.\n")
 
 
 class P3T2_TCPH(threading.Thread):
@@ -423,16 +397,6 @@ class P3T2_TCPH(threading.Thread):
                              dnsmsg_t[2],
                              dnsmsg_t[3],
                              0))
-                # Tuple values:
-                # [0] = dnsmsg_t[0] = dns message(query) in wire format
-                # [1] = data[1] = client address of the query (addr, port)
-                # [2] = threadid if using TCP, for p2 manager. -1 if UDP
-                # [3] = dnsmsg_t[2] = subnet addr (0 if not present)
-                # [4] = dnsmsg_t[3] = dns msg/query id
-
-                # tempp
-                # print("P3T2 - CP TCPH thread received and sent data:\n")
-                # print("Valid TCP DNS query - forwarding to rgw.\n")
 
 
 class P3T3_Answer(threading.Thread):
@@ -459,26 +423,6 @@ class P3T3_Answer(threading.Thread):
                 dnsmsg_t = getDNSReplyInfo(data[0], data[4], False, True)
             else:
                 dnsmsg_t = getDNSReplyInfo(data[0], data[4], False, False)
-
-            # getDNSReplyInfo returns a tuple with the following:
-            #
-            # (
-            #   dnsmessage if needed (0 usually),
-            #   resultcode,
-            #   CNAME reply string to be added to the dict (if applicable),
-            # )
-            #
-            # Specific values in tuple are 0 if not applicable/not found/etc.
-            #
-            # result codes:
-            # 0 - Malformed message overall, discard & no reply
-            # 1 - Problematic DNS query (wrong opcode, etc), discard & no reply
-            # 2 - Valid UDP reply with CNAME data (add cname string to dict)
-            # 3 - Valid UDP reply
-            # 4 - Valid UDP reply with CNAME data, fwd to TCP
-            # 5 - Valid UDP reply, fwd to TCP
-            # tempp
-
             if dnsmsg_t[1] == 0:
                 # tempp
                 print("P3T3 - Malformed DNS answer from RGW, discarding\n")
@@ -588,12 +532,267 @@ class P4TX_UDPSender(threading.Thread):
 # TODO:
 # (Optional) Process 4 (Data Forwarder, TCP) definition, threads, etc. below:
 def process4_fwdTCP(q5, q6):
-    print("lol4TCP\n")
+    pass
 
 
+# Functions below for help parsing valid command line arguments.
+class saddrAction(argparse.Action):
+    """Argparse action."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        """Check for IP address validity."""
+        try:
+            socket.inet_aton(values)
+        except socket.error:
+            parser.error("IP address should be in valid a.b.c.d IPv4 format.")
+
+        setattr(namespace, self.dest, values)
+
+
+class sportAction(argparse.Action):
+    """Argparse action."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        """Check for port validity."""
+        if ((values < 1) or (values > 65535)):
+            parser.error("Port numbers shoud be between 1 and 65535.")
+
+        setattr(namespace, self.dest, values)
+
+
+class ecsAction(argparse.Action):
+    """Argparse action."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        """Check for yes or no value validity."""
+        if not ((values == "yes") or (values == "no")):
+            parser.error("ECS option should be yes or no.")
+
+        setattr(namespace, self.dest, values)
+
+
+class tcpAction(argparse.Action):
+    """Argparse action."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        """Check for yes or no value validity."""
+        if not ((values == "yes") or (values == "no")):
+            parser.error("TCP option should be yes or no.")
+
+        setattr(namespace, self.dest, values)
+
+
+class cnameAction(argparse.Action):
+    """Argparse action."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        """Check for yes or no value validity."""
+        if not ((values == "yes") or (values == "no")):
+            parser.error("CNAME option should be yes or no.")
+
+        setattr(namespace, self.dest, values)
+
+
+class randrgwAction(argparse.Action):
+    """Argparse action."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        """Check for yes or no value validity."""
+        if not ((values == "yes") or (values == "no")):
+            parser.error("Randomize RGW option should be yes or no.")
+
+        setattr(namespace, self.dest, values)
+
+
+class dnstoAction(argparse.Action):
+    """Argparse action."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        """Check for int validity."""
+        if ((values < 1) or (values > 120)):
+            parser.error("Timeout should be between 1 and 120 seconds.")
+
+        setattr(namespace, self.dest, values)
+
+
+class dnstryAction(argparse.Action):
+    """Argparse action."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        """Check for int validity."""
+        if ((values < 0) or (values > 30)):
+            parser.error("Additional attempts should be between 0 and 30.")
+
+        setattr(namespace, self.dest, values)
+
+
+class rgwsAction(argparse.Action):
+    """Argparse action."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        """Check for addr/port validity."""
+        if values:
+            ipvalue = True
+            for x in values:
+                if ipvalue is True:
+                    ipvalue = False
+                    try:
+                        socket.inet_aton(x)
+                    except socket.error:
+                        parser.error("IP address should be in valid a.b.c.d" +
+                                     " IPv4 format.")
+                else:
+                    ipvalue = True
+                    try:
+                        tempx = int(x)
+                    except ValueError:
+                        parser.error("Port number shoud be a positive integer")
+
+                    if ((tempx < 1) or (tempx > 65535)):
+                        parser.error("Port numbers shoud be between" +
+                                     " 1 and 65535.")
+
+            if ipvalue is False:
+                parser.error("Address missing a respective port value")
+
+        else:
+            parser.error("Destination RGW list empty.")
+
+        setattr(namespace, self.dest, values)
+
+
+# Main function below
 def main():
-    # TODO: Argparse input
+    """Run the main program."""
+    parser = argparse.ArgumentParser(description="Custom DNS relay server")
+    parser.add_argument("-saddr",
+                        "--dns_relay_server_address",
+                        action=saddrAction,
+                        help="Valid IPv4 address for the DNS relay server",
+                        default="127.0.0.1")
+    parser.add_argument("-sport",
+                        "--dns_relay_server_port",
+                        help="Valid port for the DNS relay server",
+                        action=sportAction,
+                        type=int,
+                        default=53)
+    parser.add_argument("-ecs",
+                        "--forward_ecs",
+                        action=ecsAction,
+                        help="Forward ECS with DNS - yes/no",
+                        default="yes")
+    parser.add_argument("-tcp",
+                        "--use_tcp_security_step",
+                        action=tcpAction,
+                        help="Use TCP DNS security step - yes/no",
+                        default="yes")
+    parser.add_argument("-cname",
+                        "--use_cname_security_step",
+                        action=cnameAction,
+                        help="Use CNAME DNS security step - yes/no",
+                        default="yes")
+    parser.add_argument("-randrgw",
+                        "--randomize_destination_rgw",
+                        action=randrgwAction,
+                        help="Randomize destination RGW - yes/no",
+                        default="yes")
+    parser.add_argument("-cnamestr",
+                        "--rgw_cname_string_component",
+                        help="Leftmost part of dest. RGW dns-cname-soa config",
+                        default="cname")
+    parser.add_argument("-dnsto",
+                        "--dns_timeout",
+                        help="DNS request timeout towards RGW in seconds",
+                        action=dnstoAction,
+                        type=int,
+                        default=3)
+    parser.add_argument("-dnstry",
+                        "--dns_request_attempts",
+                        help="Max. DNS request attempts towards RGW",
+                        action=dnstryAction,
+                        type=int,
+                        default=3)
+    parser.add_argument('-rgws',
+                        '--rgws_list',
+                        nargs='+',
+                        action=rgwsAction,
+                        help='List of RGW address (str) and port (int) pairs')
 
+    args = parser.parse_args()
+    print("Starting the custom DNS relay server...\n")
+    print("Server IP address and port: {}, {}\n".
+          format(args.dns_relay_server_address,
+                 str(args.dns_relay_server_port)))
+
+    servaddr = (args.dns_relay_server_address, args.dns_relay_server_port)
+
+    if(args.forward_ecs == "yes"):
+        print("Client subnet forwarding with DNS ECS is ON.\n")
+        forwardECS = True
+    else:
+        print("Client subnet forwarding with DNS ECS is OFF.\n")
+        forwardECS = False
+
+    if(args.use_tcp_security_step == "yes"):
+        print("DNS TCP security step is ON.\n")
+        TCPstep = True
+    else:
+        print("DNS TCP security step is OFF.\n")
+        TCPstep = False
+
+    if(args.use_cname_security_step == "yes"):
+        print("DNS CNAME security step is ON.\n")
+        CNAMEstep = True
+    else:
+        print("DNS CNAME security step is OFF.\n")
+        CNAMEstep = False
+
+    if(args.randomize_destination_rgw == "yes"):
+        print("Destination RGW randomization is ON.\n")
+        randomizeRGW = True
+    else:
+        print("Destination RGW randomization is OFF.\n")
+        randomizeRGW = False
+
+    print("CNAME string component in use: ")
+    servicecname = args.rgw_cname_string_component
+    print(servicecname)
+    print("\n")
+
+    dnstimeout = args.dns_timeout
+    dnstries = args.dns_request_attempts
+    print("DNS request timeout in seconds: ")
+    print(str(dnstimeout))
+    print("\n")
+    print("Maximum additional DNS request attempts: ")
+    print(str(dnstries))
+    print("\n")
+
+    # Populating the destination RGW list
+    if args.rgws_list:
+        tempaddr = 0
+        tempport = 0
+        ipvalue = True
+        for x in args.rgws_list:
+            if ipvalue is True:
+                ipvalue = False
+                tempaddr = x
+            else:
+                ipvalue = True
+                tempport = x
+                rgwlist.append((tempaddr, int(tempport)))
+        print("Following destination RGWs were given:\n")
+        for x in rgwlist:
+            print(x)
+        print("\n")
+    else:
+        print("No destination RGWs given, using the default: \n")
+        print("addr 127.0.0.1 port 54\n ")
+        rgwlist.append(("127.0.0.1", 54))
+
+    print("Server serves forever; exit by pressing CTRL-C")
+
+    # Creating queues for communication between processes
     # p1 -> p3 (From UDP _server_ to Data handler)
     q1 = mQueue()
 
@@ -612,24 +811,21 @@ def main():
     # p4 -> p3 (From rgwside UDP/TCP sender to data handler)
     q6 = mQueue()
 
-    rgwlist.append(RGWADDR1)
-    rgwlist.append(RGWADDR2)
-
-    p1 = Process(target=process1_UDPsrv, args=(q1, q2,))
-    p2 = Process(target=process2_TCPsrv, args=(q3, q4,))
+    p1 = Process(target=process1_UDPsrv, args=(q1, q2, servaddr))
+    p2 = Process(target=process2_TCPsrv, args=(q3, q4, servaddr))
     p3 = Process(target=process3_CP, args=(q1,
                                            q2,
                                            q3,
                                            q4,
                                            q5,
                                            q6,
-                                           SERVICECNAME,
+                                           servicecname,
                                            ECSMASK,
                                            forwardECS))
     p4 = Process(target=process4_fwdUDP, args=(q5,
                                                q6,
-                                               DNSTIMEOUT,
-                                               DNSTRIES,
+                                               dnstimeout,
+                                               dnstries,
                                                rgwlist,
                                                randomizeRGW))
     p1.start()

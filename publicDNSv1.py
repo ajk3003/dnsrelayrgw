@@ -38,6 +38,12 @@ from socket import IPPROTO_TCP, TCP_NODELAY
 
 from multiprocessing import Queue as mQueue
 from multiprocessing import Process
+"""
+This program is a simple DNS relay for forwarding DNS queries to some DNS
+server further in the DNS system. This relay can add ECS client subnet
+information to the DNS messages it handles. The parameters for the program
+can be set on modifying the global variables below.
+"""
 
 # temp default values for variables below
 # TODO: adjust and/or put argparse input instead
